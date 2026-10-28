@@ -110,6 +110,7 @@ td.t{font-family:var(--mono);font-variant-numeric:tabular-nums;color:var(--muted
     <div><span id="doneName"></span>, elegiste</div>
     <div class="done-food" id="doneFood"></div>
     <p class="note">Gracias por votar. Abajo ves cómo va el conteo.</p>
+    <button class="btn ghost" id="nextVoter" type="button">Votar con otro nombre</button>
   </section>
 
   <section class="ticket" id="adminPanel" hidden>
@@ -163,7 +164,7 @@ const ADMIN_KEY = "mateo";
 
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
-import { getFirestore, collection, doc, getDoc, writeBatch, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { getFirestore, collection, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 const $ = id => document.getElementById(id);
 const foodName = id => (FOODS.find(f=>f.id===id)||{n:id}).n;
@@ -172,14 +173,14 @@ const nameKey = s => s.normalize("NFD").replace(/[̀-ͯ]/g,"").toLowerCase().tri
   .replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"").slice(0,40);
 
 let db=null, uid=null, ready=false;
-let myName="", myKey="", isAdmin=false, picked=null, votes=[], myVote=null, busy=false;
+let myName="", myKey="", isAdmin=false, picked=null, votes=[], myVote=null, busy=false; // myVote: el voto recién hecho en esta pantalla
 
 const store = {
   get(k){ try{ return localStorage.getItem(k) }catch(e){ return null } },
   set(k,v){ try{ localStorage.setItem(k,v) }catch(e){} },
   del(k){ try{ localStorage.removeItem(k) }catch(e){} }
 };
-if(store.get("qc-admin")==="1"){ isAdmin=true; myName="Mateo"; myKey=ADMIN_KEY; }
+if(store.get("qc-admin")==="1"){ isAdmin=true; }
 
 // ---- Menú
 FOODS.forEach(f=>{
@@ -193,17 +194,15 @@ FOODS.forEach(f=>{
 });
 
 // ---- Qué se muestra
+// Pantallas: nombre → elegir comida → voto registrado → (otro nombre)
 function render(){
-  const votedHere = !!myVote;
-  const lockedOut = votedHere && myVote.key!==ADMIN_KEY && !isAdmin;
+  const done = !!myVote;
+  $("stepDone").hidden = !done;
+  if(done){ $("doneName").textContent=myVote.name; $("doneFood").textContent=foodName(myVote.food); }
 
-  $("stepDone").hidden = !votedHere;
-  if(votedHere){ $("doneName").textContent=myVote.name; $("doneFood").textContent=foodName(myVote.food); }
-
-  $("stepName").hidden = lockedOut || !!myName;
-  $("stepVote").hidden = lockedOut || !myName || votedHere;
+  $("stepName").hidden = done || !!myName;
+  $("stepVote").hidden = done || !myName;
   $("adminPanel").hidden = !isAdmin;
-  $("changeName").hidden = isAdmin;
   $("whoName").textContent = myName;
 
   $("nameBtn").disabled = !ready || busy || !$("nameInput").value.trim();
@@ -213,57 +212,45 @@ function render(){
   renderResults();
   if(isAdmin) renderAdmin();
 }
+const hasVoted = k => votes.some(v=>v.id===k);
+function backToStart(){
+  myName=""; myKey=""; picked=null; myVote=null;
+  $("nameInput").value=""; $("nameErr").hidden=true; $("voteErr").hidden=true;
+  render(); $("nameInput").focus();
+}
 
 // ---- Ingresar con nombre
 $("nameInput").addEventListener("input",()=>{ $("nameErr").hidden=true; render(); });
-$("nameForm").addEventListener("submit", async e=>{
+$("nameForm").addEventListener("submit", e=>{
   e.preventDefault();
   const v=$("nameInput").value.trim().replace(/\s+/g," ").slice(0,40);
   const k=nameKey(v);
   if(!k){ showErr("nameErr","Escribí un nombre con al menos una letra o número."); return; }
-  if(k===ADMIN_KEY){
-    isAdmin=true; myName="Mateo"; myKey=k; store.set("qc-admin","1"); render(); return;
+  if(k===ADMIN_KEY){ isAdmin=true; store.set("qc-admin","1"); }
+  if(hasVoted(k)){
+    showErr("nameErr", (k===ADMIN_KEY?"Mateo":"“"+v+"”")+" ya votó. Cada nombre puede votar una sola vez.");
+    render(); return;
   }
-  if(myVote){ showErr("nameErr","Desde este dispositivo ya se votó. Cada persona vota desde su propio celular."); return; }
-  busy=true; render();
-  try{
-    const snap=await getDoc(doc(db,"names",k));
-    if(snap.exists()){
-      showErr("nameErr","El nombre “"+v+"” ya votó. Si sos otra persona, agregá tu apellido o una inicial.");
-    }else{
-      myName=v; myKey=k; picked=null;
-    }
-  }catch(err){
-    console.error(err); showErr("nameErr","No se pudo comprobar el nombre. Revisá tu conexión y probá de nuevo.");
-  }finally{ busy=false; render(); }
+  myName = k===ADMIN_KEY ? "Mateo" : v; myKey=k; picked=null; render();
 });
-$("changeName").addEventListener("click",()=>{
-  $("nameInput").value=myName; myName=""; myKey=""; picked=null; render(); $("nameInput").focus();
-});
-$("adminExit").addEventListener("click",()=>{
-  isAdmin=false; myName=""; myKey=""; picked=null; store.del("qc-admin"); $("nameInput").value=""; render();
-});
+$("changeName").addEventListener("click", backToStart);
+$("nextVoter").addEventListener("click", backToStart);
+$("adminExit").addEventListener("click",()=>{ isAdmin=false; store.del("qc-admin"); backToStart(); });
 
-// ---- Votar: reserva el nombre y guarda el voto juntos, sin posibilidad de cambiarlo
+// ---- Votar: un voto por nombre, sin posibilidad de cambiarlo
 $("voteBtn").addEventListener("click", async ()=>{
   if(!ready||!picked||!myKey||busy) return;
+  if(hasVoted(myKey)){ showErr("voteErr", myName+" ya votó. Cada nombre puede votar una sola vez."); return; }
   busy=true; $("voteErr").hidden=true; render();
   try{
-    const b=writeBatch(db);
-    b.set(doc(db,"names",myKey), {uid});
-    b.set(doc(db,"votes",uid), {name:myName, key:myKey, food:picked, at:Date.now()});
-    await b.commit();
-    myVote={id:uid, name:myName, key:myKey, food:picked};
-    $("stepResults").scrollIntoView({behavior: matchMedia("(prefers-reduced-motion: reduce)").matches?"auto":"smooth"});
+    await setDoc(doc(db,"votes",myKey), {name:myName, food:picked, at:Date.now(), uid});
+    myVote={id:myKey, name:myName, food:picked};
+    $("stepDone").scrollIntoView({behavior: matchMedia("(prefers-reduced-motion: reduce)").matches?"auto":"smooth", block:"start"});
   }catch(err){
     console.error(err);
-    if(err && err.code==="permission-denied"){
-      showErr("voteErr", myKey===ADMIN_KEY
-        ? "Mateo ya votó desde otro dispositivo."
-        : "No se pudo votar: ese nombre ya votó o este dispositivo ya votó.");
-    }else{
-      showErr("voteErr","No se pudo guardar el voto. Revisá tu conexión y probá de nuevo.");
-    }
+    showErr("voteErr", err && err.code==="permission-denied"
+      ? myName+" ya votó. Cada nombre puede votar una sola vez."
+      : "No se pudo guardar el voto. Revisá tu conexión y probá de nuevo.");
   }finally{ busy=false; render(); }
 });
 
@@ -284,7 +271,6 @@ function renderResults(){
   FOODS.map(f=>({f,list:by[f.id]})).sort((a,b)=>b.list.length-a.list.length).forEach(({f,list})=>{
     const it=document.createElement("div"); it.className="res-item"+(list.length&&list.length===max?" top":"");
     const n=document.createElement("span"); n.className="n"; n.textContent=f.n;
-    if(list.some(v=>v.id===uid)){ const m=document.createElement("span"); m.className="mine"; m.textContent="tu voto"; n.appendChild(m); }
     const c=document.createElement("span"); c.className="c";
     c.textContent=list.length+(list.length===1?" persona":" personas");
     const bar=document.createElement("div"); bar.className="bar";
@@ -322,7 +308,6 @@ if(firebaseConfig.apiKey==="PEGAR_ACA"){
       $("status").textContent="Se actualiza en vivo cuando alguien vota.";
       onSnapshot(collection(db,"votes"), snap=>{
         votes=snap.docs.map(d=>({id:d.id, ...d.data()})).filter(v=>v.name&&v.food);
-        myVote=votes.find(v=>v.id===uid)||null;
         ready=true; render();
       }, err=>{ console.error(err); $("status").textContent="No se pudieron cargar los votos. Recargá la página."; });
     });
