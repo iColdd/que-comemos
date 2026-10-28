@@ -68,6 +68,13 @@ button{font:inherit;cursor:pointer}
 .mine{font-size:12px;font-family:var(--mono);background:var(--mustard);color:var(--mustard-ink);padding:1px 6px;border-radius:4px;margin-left:6px}
 .note{font-size:14px;color:var(--muted);margin:0}
 .err{color:var(--danger);font-size:14px;margin:0}
+.done-food{font-family:var(--display);font-weight:800;font-size:1.6rem;line-height:1.1}
+.admin-tag{font-family:var(--mono);font-size:12px;letter-spacing:.06em;text-transform:uppercase;background:var(--ink);color:var(--paper);padding:2px 8px;border-radius:4px}
+.tbl-wrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:15px}
+th,td{text-align:left;padding:9px 6px;border-bottom:1px solid var(--line)}
+th{font-size:12px;font-family:var(--mono);text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:500}
+td.t{font-family:var(--mono);font-variant-numeric:tabular-nums;color:var(--muted);font-size:13px;white-space:nowrap}
 @media (prefers-reduced-motion:reduce){.bar i{transition:none}}
 </style>
 </head>
@@ -76,14 +83,15 @@ button{font:inherit;cursor:pointer}
   <header>
     <span class="eyebrow">Votación del almuerzo</span>
     <h1>¿Qué <em>comemos</em> hoy?</h1>
-    <p class="lead">Poné tu nombre, elegí tu comida y mirá cuántos piden cada plato.</p>
+    <p class="lead">Poné tu nombre, elegí tu comida y mirá cuántos piden cada plato. Cada persona vota una sola vez.</p>
   </header>
 
-  <section class="ticket" id="stepName">
+  <section class="ticket" id="stepName" hidden>
     <h2>Ingresá con tu nombre</h2>
     <form id="nameForm" style="display:flex;flex-direction:column;gap:10px">
       <label for="nameInput">Tu nombre</label>
-      <input type="text" id="nameInput" maxlength="40" autocomplete="given-name" placeholder="Ej: Mateo">
+      <input type="text" id="nameInput" maxlength="40" autocomplete="given-name" placeholder="Ej: Juli">
+      <p class="err" id="nameErr" hidden></p>
       <button class="btn" id="nameBtn" type="submit" disabled>Ingresar</button>
     </form>
   </section>
@@ -92,15 +100,35 @@ button{font:inherit;cursor:pointer}
     <div class="who"><span>Votando como <b id="whoName"></b></span><button class="linkbtn" id="changeName" type="button">Cambiar nombre</button></div>
     <h2>Elegí tu comida</h2>
     <div class="menu" id="menu" role="group" aria-label="Opciones de comida"></div>
+    <p class="note">Una vez que aceptás, el voto no se puede cambiar.</p>
     <button class="btn" id="voteBtn" type="button" disabled>Aceptar voto</button>
     <p class="err" id="voteErr" hidden></p>
   </section>
 
-  <section class="ticket" id="stepResults">
+  <section class="ticket" id="stepDone" hidden>
+    <span class="eyebrow">Voto registrado</span>
+    <div><span id="doneName"></span>, elegiste</div>
+    <div class="done-food" id="doneFood"></div>
+    <p class="note">Gracias por votar. Abajo ves cómo va el conteo.</p>
+  </section>
+
+  <section class="ticket" id="adminPanel" hidden>
     <div class="row" style="justify-content:space-between">
-      <h2>Conteo de pedidos</h2>
-      <button class="btn ghost" id="revote" type="button" hidden>Cambiar mi voto</button>
+      <h2>Quién votó qué</h2>
+      <span class="admin-tag">Modo Mateo</span>
     </div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Nombre</th><th>Comida</th><th>Hora</th></tr></thead>
+        <tbody id="adminRows"></tbody>
+      </table>
+    </div>
+    <p class="note" id="adminEmpty">Todavía no votó nadie.</p>
+    <button class="btn ghost" id="adminExit" type="button">Salir del modo Mateo</button>
+  </section>
+
+  <section class="ticket" id="stepResults">
+    <h2>Conteo de pedidos</h2>
     <div class="res" id="results"><p class="note">Todavía no votó nadie. El primer voto aparece acá al instante.</p></div>
     <div class="total"><span>Personas que comen</span><span id="total">0</span></div>
     <p class="note" id="status">Conectando…</p>
@@ -110,7 +138,6 @@ button{font:inherit;cursor:pointer}
 <script type="module">
 // ============================================================
 // 1) PEGÁ ACÁ LA CONFIGURACIÓN DE TU PROYECTO DE FIREBASE
-//    (Firebase → Configuración del proyecto → Tus apps → Web)
 // ============================================================
 const firebaseConfig = {
   apiKey: "AIzaSyDbkLzJgAnQSZxWJB9xXdDUpPtnGRG77z8",
@@ -131,17 +158,28 @@ const FOODS = [
   {id:"ensalada",    n:"Ensalada",    d:"Opción liviana"}
 ];
 
+// 3) Nombre del organizador: puede entrar siempre y ve quién votó qué.
+const ADMIN_KEY = "mateo";
+
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
-import { getFirestore, collection, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { getFirestore, collection, doc, getDoc, writeBatch, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 const $ = id => document.getElementById(id);
-let db = null, uid = null, myName = "", picked = null, votes = [], hasVoted = false;
+const foodName = id => (FOODS.find(f=>f.id===id)||{n:id}).n;
+// "Mateo", "mateo ", "MATEO" y "Matéo" son el mismo nombre
+const nameKey = s => s.normalize("NFD").replace(/[̀-ͯ]/g,"").toLowerCase().trim()
+  .replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"").slice(0,40);
+
+let db=null, uid=null, ready=false;
+let myName="", myKey="", isAdmin=false, picked=null, votes=[], myVote=null, busy=false;
 
 const store = {
   get(k){ try{ return localStorage.getItem(k) }catch(e){ return null } },
-  set(k,v){ try{ localStorage.setItem(k,v) }catch(e){} }
+  set(k,v){ try{ localStorage.setItem(k,v) }catch(e){} },
+  del(k){ try{ localStorage.removeItem(k) }catch(e){} }
 };
+if(store.get("qc-admin")==="1"){ isAdmin=true; myName="Mateo"; myKey=ADMIN_KEY; }
 
 // ---- Menú
 FOODS.forEach(f=>{
@@ -150,49 +188,88 @@ FOODS.forEach(f=>{
   const n=document.createElement("span"); n.className="n"; n.textContent=f.n;
   const d=document.createElement("span"); d.className="d"; d.textContent=f.d;
   b.append(n,d);
-  b.addEventListener("click",()=>{ picked=f.id; renderMenu(); });
+  b.addEventListener("click",()=>{ picked=f.id; render(); });
   $("menu").appendChild(b);
 });
-function renderMenu(){
+
+// ---- Qué se muestra
+function render(){
+  const votedHere = !!myVote;
+  const lockedOut = votedHere && myVote.key!==ADMIN_KEY && !isAdmin;
+
+  $("stepDone").hidden = !votedHere;
+  if(votedHere){ $("doneName").textContent=myVote.name; $("doneFood").textContent=foodName(myVote.food); }
+
+  $("stepName").hidden = lockedOut || !!myName;
+  $("stepVote").hidden = lockedOut || !myName || votedHere;
+  $("adminPanel").hidden = !isAdmin;
+  $("changeName").hidden = isAdmin;
+  $("whoName").textContent = myName;
+
+  $("nameBtn").disabled = !ready || busy || !$("nameInput").value.trim();
   document.querySelectorAll(".opt").forEach(b=>b.setAttribute("aria-pressed", String(b.dataset.id===picked)));
-  $("voteBtn").disabled = !picked || !db || !uid;
+  $("voteBtn").disabled = !ready || busy || !picked;
+
+  renderResults();
+  if(isAdmin) renderAdmin();
 }
 
-// ---- Pantallas
-function show(step){
-  $("stepName").hidden = step!=="name";
-  $("stepVote").hidden = step!=="vote";
-  $("revote").hidden = step!=="done";
-}
-
-// ---- Nombre
-$("nameInput").addEventListener("input",e=>{ $("nameBtn").disabled = !e.target.value.trim(); });
-$("nameForm").addEventListener("submit",e=>{
+// ---- Ingresar con nombre
+$("nameInput").addEventListener("input",()=>{ $("nameErr").hidden=true; render(); });
+$("nameForm").addEventListener("submit", async e=>{
   e.preventDefault();
-  const v=$("nameInput").value.trim().slice(0,40); if(!v) return;
-  myName=v; store.set("qc-name",v); $("whoName").textContent=v; show("vote"); renderMenu();
+  const v=$("nameInput").value.trim().replace(/\s+/g," ").slice(0,40);
+  const k=nameKey(v);
+  if(!k){ showErr("nameErr","Escribí un nombre con al menos una letra o número."); return; }
+  if(k===ADMIN_KEY){
+    isAdmin=true; myName="Mateo"; myKey=k; store.set("qc-admin","1"); render(); return;
+  }
+  if(myVote){ showErr("nameErr","Desde este dispositivo ya se votó. Cada persona vota desde su propio celular."); return; }
+  busy=true; render();
+  try{
+    const snap=await getDoc(doc(db,"names",k));
+    if(snap.exists()){
+      showErr("nameErr","El nombre “"+v+"” ya votó. Si sos otra persona, agregá tu apellido o una inicial.");
+    }else{
+      myName=v; myKey=k; picked=null;
+    }
+  }catch(err){
+    console.error(err); showErr("nameErr","No se pudo comprobar el nombre. Revisá tu conexión y probá de nuevo.");
+  }finally{ busy=false; render(); }
 });
 $("changeName").addEventListener("click",()=>{
-  $("nameInput").value=myName; $("nameBtn").disabled=!myName; show("name"); $("nameInput").focus();
+  $("nameInput").value=myName; myName=""; myKey=""; picked=null; render(); $("nameInput").focus();
 });
-$("revote").addEventListener("click",()=>{ $("whoName").textContent=myName; show("vote"); renderMenu(); });
+$("adminExit").addEventListener("click",()=>{
+  isAdmin=false; myName=""; myKey=""; picked=null; store.del("qc-admin"); $("nameInput").value=""; render();
+});
 
-// ---- Votar (cada dispositivo tiene un solo voto: el documento se llama como su id)
+// ---- Votar: reserva el nombre y guarda el voto juntos, sin posibilidad de cambiarlo
 $("voteBtn").addEventListener("click", async ()=>{
-  if(!db||!uid||!picked) return;
-  $("voteBtn").disabled=true; $("voteErr").hidden=true;
+  if(!ready||!picked||!myKey||busy) return;
+  busy=true; $("voteErr").hidden=true; render();
   try{
-    await setDoc(doc(db,"votes",uid), {name:myName, food:picked, at:Date.now()});
-    hasVoted=true; show("done");
+    const b=writeBatch(db);
+    b.set(doc(db,"names",myKey), {uid});
+    b.set(doc(db,"votes",uid), {name:myName, key:myKey, food:picked, at:Date.now()});
+    await b.commit();
+    myVote={id:uid, name:myName, key:myKey, food:picked};
     $("stepResults").scrollIntoView({behavior: matchMedia("(prefers-reduced-motion: reduce)").matches?"auto":"smooth"});
   }catch(err){
     console.error(err);
-    $("voteErr").textContent="No se pudo guardar el voto. Revisá tu conexión y probá de nuevo.";
-    $("voteErr").hidden=false;
-  }finally{ renderMenu(); }
+    if(err && err.code==="permission-denied"){
+      showErr("voteErr", myKey===ADMIN_KEY
+        ? "Mateo ya votó desde otro dispositivo."
+        : "No se pudo votar: ese nombre ya votó o este dispositivo ya votó.");
+    }else{
+      showErr("voteErr","No se pudo guardar el voto. Revisá tu conexión y probá de nuevo.");
+    }
+  }finally{ busy=false; render(); }
 });
 
-// ---- Resultados
+function showErr(id,msg){ $(id).textContent=msg; $(id).hidden=false; }
+
+// ---- Conteo (todos ven cantidades; solo Mateo ve nombres)
 function renderResults(){
   const box=$("results"); box.textContent="";
   $("total").textContent=votes.length;
@@ -213,16 +290,25 @@ function renderResults(){
     const bar=document.createElement("div"); bar.className="bar";
     const i=document.createElement("i"); i.style.width=(list.length/votes.length*100)+"%"; bar.appendChild(i);
     it.append(n,c,bar);
-    if(list.length){ const nm=document.createElement("div"); nm.className="names"; nm.textContent=list.map(v=>v.name).join(", "); it.appendChild(nm); }
+    if(isAdmin && list.length){ const nm=document.createElement("div"); nm.className="names"; nm.textContent=list.map(v=>v.name).join(", "); it.appendChild(nm); }
     box.appendChild(it);
+  });
+}
+function renderAdmin(){
+  const tb=$("adminRows"); tb.textContent="";
+  $("adminEmpty").hidden = votes.length>0;
+  [...votes].sort((a,b)=>(a.at||0)-(b.at||0)).forEach(v=>{
+    const tr=document.createElement("tr");
+    const a=document.createElement("td"); a.textContent=v.name;
+    const b=document.createElement("td"); b.textContent=foodName(v.food);
+    const t=document.createElement("td"); t.className="t";
+    t.textContent = v.at ? new Date(v.at).toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"}) : "";
+    tr.append(a,b,t); tb.appendChild(tr);
   });
 }
 
 // ---- Inicio
-const saved=store.get("qc-name");
-if(saved){ myName=saved; $("whoName").textContent=saved; show("vote"); } else show("name");
-renderMenu();
-
+render();
 if(firebaseConfig.apiKey==="PEGAR_ACA"){
   $("status").textContent="Falta configurar Firebase: pegá tu configuración al principio del script.";
 }else{
@@ -231,19 +317,13 @@ if(firebaseConfig.apiKey==="PEGAR_ACA"){
     const auth=getAuth(app);
     db=getFirestore(app);
     onAuthStateChanged(auth, u=>{
-      if(!u) return;
-      uid=u.uid; renderMenu();
+      if(!u || uid) return;
+      uid=u.uid;
       $("status").textContent="Se actualiza en vivo cuando alguien vota.";
       onSnapshot(collection(db,"votes"), snap=>{
         votes=snap.docs.map(d=>({id:d.id, ...d.data()})).filter(v=>v.name&&v.food);
-        const mine=votes.find(v=>v.id===uid);
-        if(mine && !hasVoted){
-          hasVoted=true; picked=mine.food;
-          if(!myName){ myName=mine.name; $("whoName").textContent=myName; }
-          if(myName) show("done");
-          renderMenu();
-        }
-        renderResults();
+        myVote=votes.find(v=>v.id===uid)||null;
+        ready=true; render();
       }, err=>{ console.error(err); $("status").textContent="No se pudieron cargar los votos. Recargá la página."; });
     });
     signInAnonymously(auth).catch(err=>{
