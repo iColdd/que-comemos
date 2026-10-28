@@ -125,6 +125,7 @@ td.t{font-family:var(--mono);font-variant-numeric:tabular-nums;color:var(--muted
       </table>
     </div>
     <p class="note" id="adminEmpty">Todavía no votó nadie.</p>
+    <p class="note">Como organizador, Mateo no vota y no aparece en el conteo.</p>
     <button class="btn ghost" id="adminExit" type="button">Salir del modo Mateo</button>
   </section>
 
@@ -159,7 +160,7 @@ const FOODS = [
   {id:"ensalada",    n:"Ensalada",    d:"Opción liviana"}
 ];
 
-// 3) Nombre del organizador: puede entrar siempre y ve quién votó qué.
+// 3) Nombre del organizador: puede entrar siempre, ve quién votó qué y no vota.
 const ADMIN_KEY = "mateo";
 
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
@@ -226,12 +227,17 @@ $("nameForm").addEventListener("submit", e=>{
   const v=$("nameInput").value.trim().replace(/\s+/g," ").slice(0,40);
   const k=nameKey(v);
   if(!k){ showErr("nameErr","Escribí un nombre con al menos una letra o número."); return; }
-  if(k===ADMIN_KEY){ isAdmin=true; store.set("qc-admin","1"); }
+  if(k===ADMIN_KEY){
+    // Mateo organiza: entra al panel, pero no vota
+    isAdmin=true; store.set("qc-admin","1"); $("nameInput").value=""; render();
+    $("adminPanel").scrollIntoView({behavior: matchMedia("(prefers-reduced-motion: reduce)").matches?"auto":"smooth", block:"start"});
+    return;
+  }
   if(hasVoted(k)){
-    showErr("nameErr", (k===ADMIN_KEY?"Mateo":"“"+v+"”")+" ya votó. Cada nombre puede votar una sola vez.");
+    showErr("nameErr", "“"+v+"” ya votó. Cada nombre puede votar una sola vez.");
     render(); return;
   }
-  myName = k===ADMIN_KEY ? "Mateo" : v; myKey=k; picked=null; render();
+  myName=v; myKey=k; picked=null; render();
 });
 $("changeName").addEventListener("click", backToStart);
 $("nextVoter").addEventListener("click", backToStart);
@@ -307,7 +313,9 @@ if(firebaseConfig.apiKey==="PEGAR_ACA"){
       uid=u.uid;
       $("status").textContent="Se actualiza en vivo cuando alguien vota.";
       onSnapshot(collection(db,"votes"), snap=>{
-        votes=snap.docs.map(d=>({id:d.id, ...d.data()})).filter(v=>v.name&&v.food);
+        // El voto de Mateo no cuenta (por si quedó alguno guardado)
+        votes=snap.docs.map(d=>({id:d.id, ...d.data()}))
+          .filter(v=>v.name && v.food && v.id!==ADMIN_KEY && nameKey(String(v.name))!==ADMIN_KEY);
         ready=true; render();
       }, err=>{ console.error(err); $("status").textContent="No se pudieron cargar los votos. Recargá la página."; });
     });
